@@ -1,0 +1,5 @@
+# Override global ignores for this repository's public skill.
+!/.agents/
+!/.agents/skills/
+!/.agents/skills/write-technical-english/
+!/.agents/skills/write-technical-english/**

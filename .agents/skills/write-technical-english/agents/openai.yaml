@@ -1,0 +1,7 @@
+interface:
+  display_name: 'Technical English'
+  short_description: 'Consolidate terminology and reduce jargon'
+  default_prompt: 'Use $write-technical-english to consolidate terminology and replace unnecessary jargon while preserving exact terms, uncertainty, and meaning.'
+
+policy:
+  allow_implicit_invocation: false
