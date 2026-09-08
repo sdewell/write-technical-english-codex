@@ -1,0 +1,235 @@
+name: quality
+
+# This repository is a published copy of a skill package that is generated
+# from a separate, private source repository. A workflow here cannot read that
+# source, so it cannot compare this copy against it. What it can do is hold the
+# copy to every rule of the package format that does not need the source, and
+# prove each rule still detects a defect.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  package-integrity:
+    name: Package integrity
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the package, then prove each check still fires
+        run: |
+          set -uo pipefail
+
+          # The exact file set of the published package. ".github" is the one
+          # directory outside it, and is excluded everywhere below.
+          expected_files='./.agents/skills/write-technical-english/SKILL.md
+          ./.agents/skills/write-technical-english/agents/openai.yaml
+          ./.agents/skills/write-technical-english/references/artifact-profiles.md
+          ./.agents/skills/write-technical-english/references/examples.md
+          ./.agents/skills/write-technical-english/references/repository-revisions.md
+          ./.agents/skills/write-technical-english/references/source-traceability.md
+          ./.agents/skills/write-technical-english/references/vocabulary.md
+          ./.gitattributes
+          ./.gitignore
+          ./LICENSE
+          ./README.md'
+          expected_files=$(printf '%s\n' "$expected_files" | sed 's/^ *//' | LC_ALL=C sort)
+
+          # Print the frontmatter keys of a Markdown file, sorted. Exits
+          # non-zero when the frontmatter is absent, unterminated, or has no
+          # body after it.
+          frontmatter_keys() {
+            awk '
+              NR == 1 {
+                sub(/\r$/, "")
+                if ($0 != "---") { exit 2 }
+                in_frontmatter = 1
+                next
+              }
+              in_frontmatter {
+                sub(/\r$/, "")
+                if ($0 == "---") { in_frontmatter = 0; closed_frontmatter = 1; next }
+                if ($0 ~ /^[A-Za-z0-9_-]+:/) { key = $0; sub(/:.*/, "", key); print key }
+                next
+              }
+              closed_frontmatter && $0 !~ /^[[:space:]]*$/ { body_content = 1 }
+              END { if (!closed_frontmatter || !body_content) { exit 3 } }
+            ' "$1" | LC_ALL=C sort
+          }
+
+          # Every rule the published package must satisfy. Returns 1 and names
+          # each rule it breaks.
+          check_package() {
+            local root=$1
+            local skill="$root/.agents/skills/write-technical-english"
+            local status=0
+            local actual keys
+
+            bad() { echo "FAIL: $1" >&2; status=1; }
+
+            # 1. The package holds exactly the published file set: nothing
+            #    missing, nothing added.
+            actual=$(cd "$root" && find . \( -path ./.git -o -path ./.github \) -prune -o \
+              \( -type f -o -type l \) -print | LC_ALL=C sort)
+            if [ "$actual" != "$expected_files" ]; then
+              bad "package file set differs from the published skill package"
+              diff <(printf '%s\n' "$expected_files") <(printf '%s\n' "$actual") >&2 || true
+            fi
+
+            # 2. No symlink. An installer that copies the package would
+            #    otherwise carry a dangling or out-of-tree link.
+            if [ -n "$(find "$root" \( -path '*/.git' -o -path '*/.github' \) -prune -o \
+              -type l -print -quit)" ]; then
+              bad "package contains a symlink"
+            fi
+
+            # 3. No executable file. The package is documentation and metadata.
+            if [ -n "$(find "$root" \( -path '*/.git' -o -path '*/.github' \) -prune -o \
+              -type f -perm -111 -print -quit)" ]; then
+              bad "package contains an executable file"
+            fi
+
+            # 4. The skill frontmatter is well formed and carries the Codex key
+            #    set, under the documented skill name.
+            if [ -f "$skill/SKILL.md" ]; then
+              keys=$(frontmatter_keys "$skill/SKILL.md") ||
+                bad "SKILL.md frontmatter is malformed"
+              if [ "$keys" != "$(printf 'description\nname')" ]; then
+                bad "unexpected SKILL.md frontmatter keys: $(echo "$keys" | tr '\n' ' ')"
+              fi
+              grep -qx 'name: write-technical-english' "$skill/SKILL.md" ||
+                bad "unexpected skill name in SKILL.md"
+            else
+              bad "missing SKILL.md"
+            fi
+
+            # 5. The Codex agent metadata keeps implicit invocation disabled.
+            #    The README documents this, and a flip would change behavior
+            #    for every installation.
+            if [ -f "$skill/agents/openai.yaml" ]; then
+              grep -qx '  allow_implicit_invocation: false' "$skill/agents/openai.yaml" ||
+                bad "Codex implicit-invocation policy changed in agents/openai.yaml"
+            else
+              bad "missing Codex agent metadata agents/openai.yaml"
+            fi
+
+            # 6. No local filesystem path in a public file.
+            if grep -R -E -q '/Users/|/home/|~/Code|file://' \
+              "$skill" "$root/README.md" "$root/LICENSE" "$root/.gitignore"; then
+              bad "package contains a local filesystem path"
+              grep -R -E -n '/Users/|/home/|~/Code|file://' \
+                "$skill" "$root/README.md" "$root/LICENSE" "$root/.gitignore" >&2 || true
+            fi
+
+            # 7. .gitattributes must not rewrite content on export, or an
+            #    archive of this repository would not match what is committed.
+            if grep -E -q '(^|[[:space:]])(export-ignore|export-subst|filter=)' \
+              "$root/.gitattributes"; then
+              bad ".gitattributes can transform archived content"
+            fi
+
+            # 8. No private working journal at the package root.
+            if [ -n "$(find "$root" -maxdepth 1 -type f \
+              \( -name 'LEARNINGS*.md' -o -name '*-PORTABLE-LEARNINGS.md' \) -print -quit)" ]; then
+              bad "package contains a private working journal"
+            fi
+
+            return $status
+          }
+
+          # --- The real check -------------------------------------------------
+          echo "== checking the package on this branch"
+          check_package "$GITHUB_WORKSPACE" || exit 1
+          echo "package is valid"
+
+          # --- Known-positive tests -------------------------------------------
+          # An all-clear counts only from a check proven to fire. Each case
+          # below breaks one rule in a throwaway copy and requires a failure.
+          work="$RUNNER_TEMP/known-positive"
+          rm -rf "$work"
+          mkdir -p "$work"
+
+          copy_package() {
+            local dest="$work/$1"
+            rm -rf "$dest"
+            mkdir -p "$dest"
+            tar -C "$GITHUB_WORKSPACE" --exclude=./.git --exclude=./.github -cf - . |
+              tar -xf - -C "$dest"
+            printf '%s' "$dest"
+          }
+
+          failures=0
+          expect_failure() {
+            local name=$1 dest=$2
+            if check_package "$dest" >/dev/null 2>&1; then
+              echo "DETECTOR DID NOT FIRE: $name" >&2
+              failures=$((failures + 1))
+            else
+              echo "detector fired: $name"
+            fi
+          }
+
+          echo "== proving each check fires"
+
+          d=$(copy_package baseline)
+          check_package "$d" >/dev/null || {
+            echo "the throwaway copy failed the check before any damage" >&2
+            exit 1
+          }
+          echo "undamaged copy passes"
+
+          d=$(copy_package missing-reference)
+          rm -f "$d/.agents/skills/write-technical-english/references/vocabulary.md"
+          expect_failure "a reference file was deleted" "$d"
+
+          d=$(copy_package extra-file)
+          : > "$d/.agents/skills/write-technical-english/references/draft.md"
+          expect_failure "an unpublished file was added" "$d"
+
+          d=$(copy_package implicit-invocation)
+          sed -i 's/allow_implicit_invocation: false/allow_implicit_invocation: true/' \
+            "$d/.agents/skills/write-technical-english/agents/openai.yaml"
+          expect_failure "implicit invocation was enabled" "$d"
+
+          d=$(copy_package leaked-path)
+          printf '%s\n' '/Users/example/private/notes.md' >> "$d/README.md"
+          expect_failure "a local path leaked into README.md" "$d"
+
+          d=$(copy_package broken-frontmatter)
+          awk '/^---$/ { n += 1; if (n == 2) next } { print }' \
+            "$GITHUB_WORKSPACE/.agents/skills/write-technical-english/SKILL.md" \
+            > "$d/.agents/skills/write-technical-english/SKILL.md"
+          expect_failure "the SKILL.md frontmatter was left unterminated" "$d"
+
+          d=$(copy_package renamed-skill)
+          sed -i 's/^name: write-technical-english$/name: something-else/' \
+            "$d/.agents/skills/write-technical-english/SKILL.md"
+          expect_failure "the skill was renamed" "$d"
+
+          d=$(copy_package symlink)
+          rm -f "$d/.agents/skills/write-technical-english/references/vocabulary.md"
+          ln -s /etc/hostname \
+            "$d/.agents/skills/write-technical-english/references/vocabulary.md"
+          expect_failure "a reference was replaced by a symlink" "$d"
+
+          d=$(copy_package executable)
+          chmod +x "$d/README.md"
+          expect_failure "a package file was made executable" "$d"
+
+          d=$(copy_package export-ignore)
+          printf '%s\n' 'README.md export-ignore' >> "$d/.gitattributes"
+          expect_failure ".gitattributes was made to rewrite an export" "$d"
+
+          d=$(copy_package journal)
+          : > "$d/LEARNINGS.md"
+          expect_failure "a private working journal was added" "$d"
+
+          rm -rf "$work"
+          if [ "$failures" -ne 0 ]; then
+            echo "$failures check(s) did not fire; the all-clear above is not evidence" >&2
+            exit 1
+          fi
+          echo "all checks proven to fire"
