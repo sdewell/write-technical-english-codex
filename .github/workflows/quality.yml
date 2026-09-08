@@ -23,8 +23,10 @@ jobs:
         run: |
           set -uo pipefail
 
-          # The exact file set of the published package. ".github" is the one
-          # directory outside it, and is excluded everywhere below.
+          # The exact file set of the published package. ".github" is one
+          # directory outside it; the repo's own framework docs (CLAUDE.md and
+          # siblings, docs/) are repo-level meta-documentation, not part of the
+          # installed package, and are excluded the same way.
           expected_files='./.agents/skills/write-technical-english/SKILL.md
           ./.agents/skills/write-technical-english/agents/openai.yaml
           ./.agents/skills/write-technical-english/references/artifact-profiles.md
@@ -71,9 +73,14 @@ jobs:
             bad() { echo "FAIL: $1" >&2; status=1; }
 
             # 1. The package holds exactly the published file set: nothing
-            #    missing, nothing added.
-            actual=$(cd "$root" && find . \( -path ./.git -o -path ./.github \) -prune -o \
-              \( -type f -o -type l \) -print | LC_ALL=C sort)
+            #    missing, nothing added. The repo's own framework docs
+            #    (CLAUDE.md and siblings, docs/) are excluded here too — they
+            #    are not part of the installed package.
+            actual=$(cd "$root" && find . \( -path ./.git -o -path ./.github -o -path ./docs \) -prune -o \
+              \( -type f -o -type l \) \
+              ! -path './CLAUDE.md' ! -path './ARCHITECTURE.md' ! -path './AGENTS.md' \
+              ! -path './CONTEXT.md' ! -path './DECISIONS.md' ! -path './PLAN.md' \
+              -print | LC_ALL=C sort)
             if [ "$actual" != "$expected_files" ]; then
               bad "package file set differs from the published skill package"
               diff <(printf '%s\n' "$expected_files") <(printf '%s\n' "$actual") >&2 || true
