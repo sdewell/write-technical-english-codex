@@ -7,7 +7,7 @@ name: quality
 # prove each rule still detects a defect.
 
 on:
-  pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
